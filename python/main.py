@@ -10,14 +10,13 @@ MAX_BLOCK_WEIGHT = 4000000
 
 def read_transactions():
     transactions = []
-    for file in sorted(os.listdir(MEMPOOL_DIR)):
-        if file.endswith(".json"):
-            with open(os.path.join(MEMPOOL_DIR, file), "r") as f:
-                transactions.append(json.load(f))
+    for filename in sorted(os.listdir(MEMPOOL_DIR)):
+        if filename.endswith(".json"):
+            txid = filename[:-5]
+            with open(os.path.join(MEMPOOL_DIR, filename), "r") as f:
+                tx = json.load(f)
+            transactions.append((txid, tx))
     return transactions
-
-def compute_txid(transaction):
-    return hashlib.sha256(json.dumps(transaction, sort_keys=True).encode()).hexdigest()
 
 def double_sha256(b):
     return hashlib.sha256(hashlib.sha256(b).digest()).digest()
@@ -29,8 +28,7 @@ def compute_witness_merkle_root(witness_hashes):
     while len(hashes) > 1:
         if len(hashes) % 2 == 1:
             hashes.append(hashes[-1])
-        new_hashes = [double_sha256(hashes[i] + hashes[i+1]) for i in range(0, len(hashes), 2)]
-        hashes = new_hashes
+        hashes = [double_sha256(hashes[i] + hashes[i+1]) for i in range(0, len(hashes), 2)]
     return hashes[0]
 
 def create_coinbase_tx(witness_merkle_root):
@@ -48,8 +46,7 @@ def create_coinbase_tx(witness_merkle_root):
     script1_len = bytes([len(script1)])
     tx_out1 = value1 + script1_len + script1
     value2 = struct.pack("<Q", 0)
-    commitment_data = b"\xaa\x21\xa9\xed" + witness_merkle_root
-    script2 = b"\x6a" + bytes([len(commitment_data)]) + commitment_data
+    script2 = b"\x6a" + b"\x24" + b"\xaa\x21\xa9\xed" + witness_merkle_root
     script2_len = bytes([len(script2)])
     tx_out2 = value2 + script2_len + script2
     locktime = struct.pack("<I", 0)
@@ -67,57 +64,51 @@ def simple_merkle_root(txids):
     while len(hashes) > 1:
         if len(hashes) % 2 == 1:
             hashes.append(hashes[-1])
-        new_hashes = [hashlib.sha256((hashes[i] + hashes[i+1]).encode()).hexdigest() for i in range(0, len(hashes), 2)]
-        hashes = new_hashes
+        hashes = [hashlib.sha256((hashes[i] + hashes[i+1]).encode()).hexdigest() for i in range(0, len(hashes), 2)]
     return hashes[0]
 
 def get_tx_weight(non_witness_hex, full_tx_hex):
-    non_witness = bytes.fromhex(non_witness_hex)
-    full_tx = bytes.fromhex(full_tx_hex)
-    return len(non_witness) * 3 + len(full_tx)
+    return len(bytes.fromhex(non_witness_hex)) * 3 + len(bytes.fromhex(full_tx_hex))
 
 def mine_block(previous_block_hash, merkle_root, timestamp):
     version = struct.pack("<I", 4)
     prev_block_le = bytes.fromhex(previous_block_hash)[::-1]
-    merkle_le = bytes.fromhex(merkle_root)[::-1]
+    merkle_be = bytes.fromhex(merkle_root)
     time_bytes = struct.pack("<I", int(timestamp))
     bits = struct.pack("<I", 0x1f00ffff)
     nonce = 0
     while True:
         nonce_bytes = struct.pack("<I", nonce)
-        header = version + prev_block_le + merkle_le + time_bytes + bits + nonce_bytes
+        header = version + prev_block_le + merkle_be + time_bytes + bits + nonce_bytes
         h = hashlib.sha256(header).digest()[::-1]
         if int.from_bytes(h, "big") < DIFFICULTY_TARGET:
             return header.hex(), nonce
         nonce += 1
 
 def main():
-    transactions = read_transactions()
+    tx_list = read_transactions()
     selected_txs = []
     mempool_txids = []
     coinbase_witness_hash = b'\x00' * 32
     empty_witness_hash = double_sha256(b'')
     temp_witness_hashes = [coinbase_witness_hash]
     total_weight = 0
-    mempool_weights = [(tx, len(json.dumps(tx, sort_keys=True).encode()) * 4) for tx in transactions]
+    mempool_weights = [(txid, tx, len(json.dumps(tx, sort_keys=True).encode()) * 4) for txid, tx in tx_list]
     dummy_witness_root = b'\x00' * 32
     coinbase_full_hex, coinbase_txid, coinbase_non_witness_hex = create_coinbase_tx(dummy_witness_root)
     coinbase_weight = get_tx_weight(coinbase_non_witness_hex, coinbase_full_hex)
     total_weight += coinbase_weight
-    for tx, weight in mempool_weights:
+    for txid, tx, weight in mempool_weights:
         if total_weight + weight <= MAX_BLOCK_WEIGHT:
             selected_txs.append(tx)
             total_weight += weight
-            mempool_txids.append(compute_txid(tx))
+            mempool_txids.append(txid)
             temp_witness_hashes.append(empty_witness_hash)
         else:
             break
     witness_merkle_root = compute_witness_merkle_root(temp_witness_hashes)
     coinbase_full_hex, coinbase_txid, coinbase_non_witness_hex = create_coinbase_tx(witness_merkle_root)
     txids = [coinbase_txid] + mempool_txids
-
-
-
     merkle_root = simple_merkle_root(txids)
     previous_block_hash = "0000abcd" + "0" * 56
     current_time = int(time.time())
