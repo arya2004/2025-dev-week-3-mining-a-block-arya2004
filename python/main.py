@@ -45,10 +45,10 @@ def create_coinbase_tx(witness_merkle_root):
     script1 = b"\x51"
     script1_len = bytes([len(script1)])
     tx_out1 = value1 + script1_len + script1
+    witness_commitment = double_sha256(b"\x00" * 32 + witness_merkle_root)
+    script2 = b"\x6a" + bytes([4 + len(witness_commitment)]) + b"\xaa\x21\xa9\xed" + witness_commitment
     value2 = struct.pack("<Q", 0)
-    script2 = b"\x6a" + b"\x24" + b"\xaa\x21\xa9\xed" + witness_merkle_root
-    script2_len = bytes([len(script2)])
-    tx_out2 = value2 + script2_len + script2
+    tx_out2 = value2 + bytes([len(script2)]) + script2
     locktime = struct.pack("<I", 0)
     non_witness = version + in_count + tx_in + out_count + tx_out1 + tx_out2 + locktime
     coinbase_txid = double_sha256(non_witness)[::-1].hex()
@@ -60,12 +60,15 @@ def create_coinbase_tx(witness_merkle_root):
 def simple_merkle_root(txids):
     if not txids:
         return "0" * 64
-    hashes = txids[:]
+    hashes = [bytes.fromhex(txid)[::-1] for txid in txids]
     while len(hashes) > 1:
         if len(hashes) % 2 == 1:
             hashes.append(hashes[-1])
-        hashes = [hashlib.sha256((hashes[i] + hashes[i+1]).encode()).hexdigest() for i in range(0, len(hashes), 2)]
-    return hashes[0]
+        new_hashes = []
+        for i in range(0, len(hashes), 2):
+            new_hashes.append(double_sha256(hashes[i] + hashes[i+1]))
+        hashes = new_hashes
+    return hashes[0][::-1].hex()
 
 def get_tx_weight(non_witness_hex, full_tx_hex):
     return len(bytes.fromhex(non_witness_hex)) * 3 + len(bytes.fromhex(full_tx_hex))
@@ -73,14 +76,14 @@ def get_tx_weight(non_witness_hex, full_tx_hex):
 def mine_block(previous_block_hash, merkle_root, timestamp):
     version = struct.pack("<I", 4)
     prev_block_le = bytes.fromhex(previous_block_hash)[::-1]
-    merkle_be = bytes.fromhex(merkle_root)
+    merkle_bytes = bytes.fromhex(merkle_root)[::-1]
     time_bytes = struct.pack("<I", int(timestamp))
     bits = struct.pack("<I", 0x1f00ffff)
     nonce = 0
     while True:
         nonce_bytes = struct.pack("<I", nonce)
-        header = version + prev_block_le + merkle_be + time_bytes + bits + nonce_bytes
-        h = hashlib.sha256(header).digest()[::-1]
+        header = version + prev_block_le + merkle_bytes + time_bytes + bits + nonce_bytes
+        h = double_sha256(header)[::-1]
         if int.from_bytes(h, "big") < DIFFICULTY_TARGET:
             return header.hex(), nonce
         nonce += 1
@@ -93,7 +96,10 @@ def main():
     empty_witness_hash = double_sha256(b'')
     temp_witness_hashes = [coinbase_witness_hash]
     total_weight = 0
-    mempool_weights = [(txid, tx, len(json.dumps(tx, sort_keys=True).encode()) * 4) for txid, tx in tx_list]
+    mempool_weights = [
+        (txid, tx, len(json.dumps(tx, sort_keys=True).encode()) * 4)
+        for txid, tx in tx_list
+    ]
     dummy_witness_root = b'\x00' * 32
     coinbase_full_hex, coinbase_txid, coinbase_non_witness_hex = create_coinbase_tx(dummy_witness_root)
     coinbase_weight = get_tx_weight(coinbase_non_witness_hex, coinbase_full_hex)
